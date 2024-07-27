@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -181,4 +182,70 @@ func reverseForward(
 	}()
 	waitGroup.Add(1)
 	waitGroup.Wait()
+}
+
+func GpgAgentForwardForWindows(
+	ctx context.Context,
+	client *ssh.Client,
+	remoteSocketPath string,
+	localSocketPort int,
+	localSocketKey []byte,
+	exitAfterTimeout time.Duration,
+	logger log.Logger,
+) error {
+	listener, err := client.Listen("unix", remoteSocketPath)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+
+	return portForwarding(
+		ctx, client, listener,
+		"unix", remoteSocketPath, "tcp", fmt.Sprintf("127.0.0.1:%d", localSocketPort),
+		exitAfterTimeout, logger, func(remoteConn net.Conn,
+			client *ssh.Client,
+			localNetwork, localAddr string,
+			log log.Logger) {
+			// Setup localConn (type net.Conn)
+			localConn, err := net.Dial(localNetwork, localAddr)
+			if err != nil {
+				log.Debugf("error dialing remote: %v", err)
+				return
+			}
+			if len(localSocketKey) != 16 {
+				log.Errorf("invalid gpg agent key length: %d", len(localSocketKey))
+			}
+			defer localConn.Close()
+			if _, err := localConn.Write(localSocketKey); err != nil {
+				log.Errorf("error writing gpg agent key: %v", err)
+				return
+			}
+
+			// Copy localConn.Reader to sshConn.Writer
+			waitGroup := sync.WaitGroup{}
+			go func() {
+				defer waitGroup.Done()
+				defer localConn.Close()
+
+				_, err = io.Copy(localConn, remoteConn)
+				if err != nil {
+					log.Debugf("error copying to local: %v", err)
+				}
+			}()
+			waitGroup.Add(1)
+
+			// Copy sshConn.Reader to localConn.Writer
+			go func() {
+				defer waitGroup.Done()
+				defer remoteConn.Close()
+
+				_, err = io.Copy(remoteConn, localConn)
+				if err != nil {
+					log.Debugf("error copying to remote: %v", err)
+				}
+			}()
+			waitGroup.Add(1)
+			waitGroup.Wait()
+		},
+	)
 }

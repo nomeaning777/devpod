@@ -4,7 +4,7 @@ import "strings"
 
 var DevVersion = "v0.0.0"
 
-var version = "v0.0.0"
+var version = "v0.5.6"
 
 func GetVersion() string {
 	return version
